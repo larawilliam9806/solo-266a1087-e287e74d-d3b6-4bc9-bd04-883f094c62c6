@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}卷材厚度 P95 核算{% endblock %}</title>
+<style>
+  :root {
+    --ink:#18212b; --muted:#5b6b7c; --line:#d7dee6; --bg:#f4f6f8;
+    --card:#fff; --accent:#1f5f8b; --accent-ink:#fff;
+    --ok:#1c6b45; --warn:#8a5a00; --bad:#9b1c1c;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI","PingFang SC",
+         "Microsoft YaHei",sans-serif; color:var(--ink); background:var(--bg); }
+  header.top { background:#12314a; color:#fff; padding:14px 22px; }
+  header.top a { color:#fff; text-decoration:none; font-weight:600; }
+  main { max-width:1080px; margin:0 auto; padding:22px 18px 60px; }
+  h1 { font-size:22px; margin:6px 0 4px; }
+  h2 { font-size:17px; margin:0 0 10px; }
+  h3 { font-size:15px; margin:18px 0 8px; }
+  p.lead { color:var(--muted); margin:0 0 18px; }
+  .card { background:var(--card); border:1px solid var(--line);
+          border-radius:10px; padding:18px; margin-bottom:16px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:760px){ .grid{grid-template-columns:1fr;} }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input[type=text], input[type=number], input[type=file], textarea {
+    width:100%; padding:8px 10px; border:1px solid var(--line);
+    border-radius:7px; font:inherit; background:#fff;
+  }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; }
+  .row > div { flex:1 1 130px; }
+  button { background:var(--accent); color:var(--accent-ink); border:0;
+           padding:9px 16px; border-radius:7px; font:inherit; cursor:pointer; }
+  button.secondary { background:#e7edf3; color:var(--ink); }
+  button.danger { background:#f3e3e3; color:var(--bad); }
+  button:hover { filter:brightness(1.05); }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
+           vertical-align:top; }
+  th { background:#eef2f6; font-weight:600; font-size:13px; color:var(--muted); }
+  .mono { font-variant-numeric:tabular-nums; }
+  .muted { color:var(--muted); }
+  .tag { display:inline-block; padding:2px 8px; border-radius:999px;
+         font-size:12px; border:1px solid var(--line); background:#f7f9fb; }
+  .tag.detail { background:#e7f3ea; border-color:#bcdcc6; color:var(--ok); }
+  .tag.summary { background:#eef1f5; }
+  .flash { padding:10px 14px; border-radius:8px; margin-bottom:12px; font-size:14px; }
+  .flash.ok { background:#e7f3ea; color:var(--ok); }
+  .flash.warn { background:#fbf1dd; color:var(--warn); }
+  .flash.error { background:#fbe7e7; color:var(--bad); }
+  .verdict { padding:14px 16px; border-radius:9px; font-size:18px; font-weight:600; }
+  .verdict.must_exceed { background:#fbe7e7; color:var(--bad); }
+  .verdict.must_not_exceed { background:#e7f3ea; color:var(--ok); }
+  .verdict.needs_detail { background:#fbf1dd; color:var(--warn); }
+  .statline { display:flex; gap:26px; flex-wrap:wrap; margin-top:14px; }
+  .statline div span { display:block; font-size:12px; color:var(--muted); }
+  .statline div strong { font-size:20px; font-variant-numeric:tabular-nums; }
+  ul.notes { margin:8px 0 0; padding-left:20px; font-size:13px; color:var(--warn); }
+  .empty { color:var(--muted); padding:12px 0; }
+  form.inline { display:inline; }
+  .hint { font-size:12px; color:var(--muted); margin-top:6px; line-height:1.5; }
+</style>
+</head>
+<body>
+<header class="top"><a href="{{ url_for('index') }}">卷材厚度 P95 核算台</a></header>
+<main>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <div class="flash {{ category if category in ['ok','warn','error'] else 'ok' }}">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}{{ batch.batch_no }} · 卷材厚度 P95 核算{% endblock %}
+{% block content %}
+<h1>批次 {{ batch.batch_no }}</h1>
+<p class="lead">
+  {{ batch.note or "登记每卷的摘要（测点数、最薄值、P95、最厚值），或为单卷上传完整读数明细。"
+  }} 判定只使用提交时的同一份档案。
+</p>
+
+<div class="card">
+  <h2>整批 P95 判定</h2>
+  <form method="post" action="{{ url_for('determine', batch_id=batch.id) }}">
+    <div class="row">
+      <div>
+        <label for="limit_um">厚度上限（微米，整批 P95 ≤ 上限为合格）</label>
+        <input id="limit_um" type="number" name="limit_um" min="0" step="1" required
+               placeholder="例如 850">
+      </div>
+      <div style="flex:0 0 auto">
+        <button type="submit">核算并保存判定</button>
+      </div>
+    </div>
+  </form>
+  <div class="hint">
+    整批共 N 个测点，P95 是升序第 ⌈N×0.95⌉ 个读数。系统算出该读数可能达到的最小值
+    与最大值：最小值已超上限 → 必超限；最大值不超过上限 → 必不超限；否则 → 待补明细。
+    摘要卷按摘要做闭式计数，不展开为逐点读数。
+  </div>
+</div>
+
+<div class="card">
+  <h2>卷与档案（{{ views|length }} 卷）</h2>
+  {% if views %}
+  <table>
+    <thead>
+      <tr>
+        <th>卷号</th><th>核算依据</th><th class="mono">测点数</th>
+        <th class="mono">最薄</th><th class="mono">P95</th><th class="mono">最厚</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for v in views %}
+      {% set s = v.summary %}
+      <tr>
+        <td><strong>{{ v.coil.coil_no }}</strong></td>
+        <td>
+          {% if v.detail and not v.mismatch and s %}
+            <span class="tag detail">明细</span>
+            <div class="hint">{{ v.detail.point_count }} 个读数，与摘要相符</div>
+          {% elif s %}
+            <span class="tag summary">摘要</span>
+            {% if v.mismatch %}<div class="hint">明细已停用，核算按摘要</div>
+            {% elif v.retired_details %}<div class="hint">明细已停用，核算按摘要</div>{% endif %}
+          {% else %}
+            <span class="muted">未登记</span>
+          {% endif %}
+        </td>
+        <td class="mono">{{ s.point_count if s else "—" }}</td>
+        <td class="mono">{{ s.min_um if s else "—" }}</td>
+        <td class="mono">{{ s.p95_um if s else "—" }}</td>
+        <td class="mono">{{ s.max_um if s else "—" }}</td>
+        <td>
+          {% if s %}
+            <form class="inline" method="post"
+                  action="{{ url_for('retire_summary_route', batch_id=batch.id, summary_id=s.id) }}">
+              <button class="danger" type="submit">作废摘要</button>
+            </form>
+          {% endif %}
+          {% if v.detail %}
+            <form class="inline" method="post"
+                  action="{{ url_for('retire_detail_route', batch_id=batch.id, detail_id=v.detail.id) }}">
+              <button class="secondary" type="submit">停用明细</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% if v.mismatch %}
+      <tr>
+        <td></td>
+        <td colspan="6" class="hint">
+          卷 {{ v.coil.coil_no }} 的明细与摘要不符：{{ v.mismatch }}。该明细已停用，
+          核算按摘要进行。若摘要应为新值，重新登记摘要即可。
+        </td>
+      </tr>
+      {% endif %}
+      {% for rd in v.retired_details %}
+      {% if not v.detail or rd.row.id != v.detail.id %}
+      <tr>
+        <td></td>
+        <td colspan="6" class="hint">
+          卷 {{ v.coil.coil_no }} 停用的明细 #{{ rd.row.id }}（{{ rd.row.point_count }} 个读数，
+          最薄 {{ rd.row.min_um }} / P95 {{ rd.row.p95_um }} / 最厚 {{ rd.row.max_um }} μm）：
+          {{ rd.row.retired_reason or "已停用" }}。核算不使用未启用的明细。
+          {% if rd.matches_summary and not v.detail %}
+          <form class="inline" method="post"
+                action="{{ url_for('activate_detail_route', batch_id=batch.id, detail_id=rd.row.id) }}">
+            <button class="secondary" type="submit">按当前摘要启用</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">还没有登记任何卷。</div>
+  {% endif %}
+
+  <h3>登记摘要</h3>
+  <form method="post" action="{{ url_for('register_summary', batch_id=batch.id) }}">
+    <div class="row">
+      <div style="flex:2 1 160px">
+        <label for="s_coil">卷号</label>
+        <input id="s_coil" type="text" name="coil_no" list="coil-list" required maxlength="64">
+      </div>
+      <div><label for="s_n">测点数</label>
+        <input id="s_n" type="number" name="point_count" min="1" step="1" required></div>
+      <div><label for="s_min">最薄值</label>
+        <input id="s_min" type="number" name="min_um" min="0" step="1" required></div>
+      <div><label for="s_p95">P95</label>
+        <input id="s_p95" type="number" name="p95_um" min="0" step="1" required></div>
+      <div><label for="s_max">最厚值</label>
+        <input id="s_max" type="number" name="max_um" min="0" step="1" required></div>
+      <div style="flex:0 0 auto"><button type="submit">登记摘要</button></div>
+    </div>
+    <div class="hint">
+      单位微米。三项统计无法同时成立时（例如 2 点卷的 P95 必须等于最厚值）将被拒绝。
+      换交摘要时，若原明细与摘要不符，原明细自动停用，改按新摘要核算。
+    </div>
+  </form>
+
+  <h3>上传单卷完整读数明细（CSV）</h3>
+  <form method="post" enctype="multipart/form-data"
+        action="{{ url_for('upload_detail', batch_id=batch.id) }}">
+    <div class="row">
+      <div style="flex:2 1 160px">
+        <label for="d_coil">卷号</label>
+        <input id="d_coil" type="text" name="coil_no" list="coil-list" required maxlength="64">
+      </div>
+      <div style="flex:3 1 260px">
+        <label for="readings">读数文件</label>
+        <input id="readings" type="file" name="readings" accept=".csv,.txt" required>
+      </div>
+      <div style="flex:0 0 auto"><button type="submit">上传并核对</button></div>
+    </div>
+    <div class="hint">
+      每行一个整数读数（微米），可带表头；也可写成「读数,最薄值,P95,最厚值」。
+      读数的点数与三项统计必须与该卷已提交摘要完全相符，明细才用于核算；
+      尚无摘要的卷不能上传明细。
+    </div>
+  </form>
+
+  <datalist id="coil-list">
+    {% for v in views %}<option value="{{ v.coil.coil_no }}">{% endfor %}
+  </datalist>
+</div>
+
+<div class="card">
+  <h2>判定记录</h2>
+  {% if history %}
+  <table>
+    <thead>
+      <tr><th>时间</th><th>上限</th><th>整批测点</th><th>P95 最小值</th>
+          <th>P95 最大值</th><th>判定</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for h in history %}
+      <tr>
+        <td class="muted mono">{{ h.row.created_at }}</td>
+        <td class="mono">{{ h.row.limit_um }} μm</td>
+        <td class="mono">{{ h.row.total_points }}</td>
+        <td class="mono">{{ h.row.min_possible }} μm</td>
+        <td class="mono">{{ h.row.max_possible }} μm</td>
+        <td>{{ h.label }}</td>
+        <td>
+          <a href="{{ url_for('determination_detail', batch_id=batch.id, det_id=h.row.id) }}">查看</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">还没有判定记录。</div>
+  {% endif %}
+</div>
+{% endblock %}

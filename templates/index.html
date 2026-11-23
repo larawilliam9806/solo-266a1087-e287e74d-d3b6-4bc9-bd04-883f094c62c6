@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}批次列表 · 卷材厚度 P95 核算{% endblock %}
+{% block content %}
+<h1>批次</h1>
+<p class="lead">
+  部分卷只留了测厚摘要。系统只在「同一份已提交的摘要和明细」上核算整批 P95
+  能达到的最小与最大值，并据此给出三种判定。
+</p>
+
+<div class="card">
+  <h2>新建批次</h2>
+  <form method="post" action="{{ url_for('create_batch') }}">
+    <div class="row">
+      <div>
+        <label for="batch_no">批号</label>
+        <input id="batch_no" type="text" name="batch_no" required maxlength="64"
+               placeholder="例如 B2026-11-023">
+      </div>
+      <div style="flex:2 1 260px">
+        <label for="note">备注（可选）</label>
+        <input id="note" type="text" name="note" maxlength="200">
+      </div>
+      <div style="flex:0 0 auto"><button type="submit">建立批次</button></div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>已有批次</h2>
+  {% if batches %}
+  <table>
+    <thead>
+      <tr><th>批号</th><th>卷数</th><th>判定次数</th><th>备注</th><th>建立时间</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for b in batches %}
+      <tr>
+        <td><a href="{{ url_for('batch_detail', batch_id=b.id) }}">{{ b.batch_no }}</a></td>
+        <td class="mono">{{ b.coil_count }}</td>
+        <td class="mono">{{ b.check_count }}</td>
+        <td class="muted">{{ b.note }}</td>
+        <td class="muted mono">{{ b.created_at }}</td>
+        <td><a href="{{ url_for('batch_detail', batch_id=b.id) }}">查看</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">还没有批次。</div>
+  {% endif %}
+</div>
+{% endblock %}

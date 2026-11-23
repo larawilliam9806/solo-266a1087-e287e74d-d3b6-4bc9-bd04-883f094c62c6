@@ -1,0 +1,14 @@
+services:
+  qc:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      QC_DB: /data/qc.db
+      QC_SECRET: change-me-in-production
+    volumes:
+      - qc-data:/data
+    restart: unless-stopped
+
+volumes:
+  qc-data:

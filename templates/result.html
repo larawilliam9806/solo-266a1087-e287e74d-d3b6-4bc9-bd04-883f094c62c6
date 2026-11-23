@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}判定结果 · {{ batch.batch_no }}{% endblock %}
+{% block content %}
+<p class="muted"><a href="{{ url_for('batch_detail', batch_id=batch.id) }}">← 返回批次 {{ batch.batch_no }}</a></p>
+<h1>判定结果</h1>
+
+<div class="card">
+  <div class="verdict {{ det.row.verdict }}">{{ det.label }}</div>
+  <div class="statline">
+    <div><span>厚度上限</span><strong>{{ limit }} μm</strong></div>
+    <div><span>整批测点数</span><strong>{{ det.row.total_points }}</strong></div>
+    <div><span>P95 位次</span><strong>第 {{ det.row.p95_index }} 个</strong></div>
+    <div><span>整批 P95 最小可能</span><strong>{{ det.row.min_possible }} μm</strong></div>
+    <div><span>整批 P95 最大可能</span><strong>{{ det.row.max_possible }} μm</strong></div>
+  </div>
+  <p class="hint">
+    {% if det.row.verdict == 'must_exceed' %}
+      即使所有摘要都取最有利的读数排布，整批 P95 仍然超过上限，必超限。
+    {% elif det.row.verdict == 'must_not_exceed' %}
+      即使所有摘要都取最不利的读数排布，整批 P95 也不超过上限，必不超限。
+    {% else %}
+      整批 P95 在不同合法读数排布下既能不超上限也可能超上限，需补充明细才能定论。
+    {% endif %}
+    判定时间 {{ det.computed_at }}。
+  </p>
+  {% if det.notes %}
+  <ul class="notes">
+    {% for note in det.notes %}<li>{{ note }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>本次核算所用档案</h2>
+  <table>
+    <thead>
+      <tr><th>卷号</th><th>依据</th><th class="mono">测点数</th>
+          <th class="mono">最薄</th><th class="mono">P95</th><th class="mono">最厚</th></tr>
+    </thead>
+    <tbody>
+      {% for c in det.coils %}
+      <tr>
+        <td>{{ c.coil_no }}</td>
+        <td>
+          {% if c.kind == 'detail' %}
+            <span class="tag detail">明细 #{{ c.detail_id }}</span>
+          {% else %}
+            <span class="tag summary">摘要 #{{ c.summary_id }}</span>
+          {% endif %}
+        </td>
+        <td class="mono">{{ c.n }}</td>
+        <td class="mono">{{ c.min_um }}</td>
+        <td class="mono">{{ c.p95_um }}</td>
+        <td class="mono">{{ c.max_um }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">{{ det.method }}</p>
+</div>
+{% endblock %}
