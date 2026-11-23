@@ -25,7 +25,7 @@
   .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   @media (max-width:760px){ .grid{grid-template-columns:1fr;} }
   label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
-  input[type=text], input[type=number], input[type=file], textarea {
+  input[type=text], input[type=number], input[type=file], textarea, select {
     width:100%; padding:8px 10px; border:1px solid var(--line);
     border-radius:7px; font:inherit; background:#fff;
   }
@@ -46,6 +46,7 @@
          font-size:12px; border:1px solid var(--line); background:#f7f9fb; }
   .tag.detail { background:#e7f3ea; border-color:#bcdcc6; color:var(--ok); }
   .tag.summary { background:#eef1f5; }
+  .tag.finished { background:#e8f0fb; border-color:#b9d2ee; color:var(--accent); }
   .flash { padding:10px 14px; border-radius:8px; margin-bottom:12px; font-size:14px; }
   .flash.ok { background:#e7f3ea; color:var(--ok); }
   .flash.warn { background:#fbf1dd; color:var(--warn); }

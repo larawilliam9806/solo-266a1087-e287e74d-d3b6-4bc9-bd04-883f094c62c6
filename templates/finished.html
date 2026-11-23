@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}成品卷 {{ coil.coil_no }} · 卷材厚度 P95 核算{% endblock %}
+{% block content %}
+<p class="muted"><a href="{{ url_for('batch_detail', batch_id=batch.id) }}">← 返回批次 {{ batch.batch_no }}</a></p>
+<h1>复卷成品卷 {{ coil.coil_no }}</h1>
+<p class="lead">
+  本卷由两卷余料按接带顺序拼接建档。读数只保存在原卷明细中，本页仅记录引用的
+  原明细号与测点区间；源卷换档或停用明细后，本成品仍按建档时冻结的原件核算。
+</p>
+
+<div class="card">
+  <h2>成品摘要（按接带区间实算）</h2>
+  <div class="statline">
+    <div><span>测点数</span><strong>{{ finished.point_count }}</strong></div>
+    <div><span>最薄值</span><strong>{{ finished.min_um }} μm</strong></div>
+    <div><span>P95</span><strong>{{ finished.p95_um }} μm</strong></div>
+    <div><span>最厚值</span><strong>{{ finished.max_um }} μm</strong></div>
+  </div>
+  <p class="hint">建档时间 {{ finished.created_at }}（UTC）。该摘要同时写入该卷的有效摘要档，参与本批次整批 P95 判定。</p>
+</div>
+
+<div class="card">
+  <h2>接带明细（按接带顺序）</h2>
+  <table>
+    <thead>
+      <tr><th>段序</th><th>原批次</th><th>原卷号</th><th>原明细号</th>
+          <th>起始序号</th><th>截止序号</th><th class="mono">本段点数</th><th>原明细当前状态</th></tr>
+    </thead>
+    <tbody>
+      {% for item in segments %}
+      {% set seg = item.row %}
+      {% set d = item.detail %}
+      <tr>
+        <td class="mono">第 {{ seg.segment_order }} 段</td>
+        <td>{{ seg.source_batch_no }}</td>
+        <td>{{ seg.source_coil_no }}</td>
+        <td class="mono">#{{ seg.detail_id }}</td>
+        <td class="mono">{{ seg.start_idx }}</td>
+        <td class="mono">{{ seg.end_idx }}</td>
+        <td class="mono">{{ seg.end_idx - seg.start_idx + 1 }}</td>
+        <td>
+          {% if d and d.active %}
+            <span class="tag detail">有效</span>
+          {% elif d %}
+            <span class="tag summary">已停用</span>
+            <div class="hint">{{ d.retired_reason or "已停用" }}；本成品仍按冻结区间核算</div>
+          {% else %}
+            <span class="muted">原明细缺失</span>
+          {% endif %}
+        </td>
+      </tr>
+      <tr>
+        <td></td>
+        <td colspan="7" class="hint">
+          原明细 #{{ seg.detail_id }} 全部已占用区间：
+          {% if item.occupancies %}
+            {% for o in item.occupancies %}
+              {{ o.start_idx }}-{{ o.end_idx }}（成品档 #{{ o.finished_coil_id }}）{% if not loop.last %}；{% endif %}
+            {% endfor %}
+          {% else %}
+            无
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">
+    序号按原明细 CSV 原顺序从 1 起算，首尾都计入。同一份原明细的每个测点最多用于一卷成品。
+  </p>
+</div>
+{% endblock %}

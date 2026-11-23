@@ -42,7 +42,17 @@
       <tr>
         <td>{{ c.coil_no }}</td>
         <td>
-          {% if c.kind == 'detail' %}
+          {% if c.kind == 'finished' %}
+            <span class="tag finished">复卷成品</span>
+            {% if c.segments %}
+            <div class="hint">
+              {% for seg in c.segments %}
+                第{{ seg.segment_order }}段：{{ seg.source_batch_no }} / {{ seg.source_coil_no }}
+                明细#{{ seg.detail_id }} 测点{{ seg.start_idx }}-{{ seg.end_idx }}{% if not loop.last %}；{% endif %}
+              {% endfor %}
+            </div>
+            {% endif %}
+          {% elif c.kind == 'detail' %}
             <span class="tag detail">明细 #{{ c.detail_id }}</span>
           {% else %}
             <span class="tag summary">摘要 #{{ c.summary_id }}</span>

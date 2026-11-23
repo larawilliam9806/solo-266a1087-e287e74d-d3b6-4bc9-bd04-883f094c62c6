@@ -43,9 +43,16 @@
       {% for v in views %}
       {% set s = v.summary %}
       <tr>
-        <td><strong>{{ v.coil.coil_no }}</strong></td>
+        <td><strong>{{ v.coil.coil_no }}</strong>
+          {% if v.finished %}
+            <div class="hint"><a href="{{ url_for('finished_detail', batch_id=batch.id, finished_id=v.finished.id) }}">复卷成品档案 →</a></div>
+          {% endif %}
+        </td>
         <td>
-          {% if v.detail and not v.mismatch and s %}
+          {% if v.finished %}
+            <span class="tag finished">复卷成品</span>
+            <div class="hint">按接带区间实算，读数仍只存于原卷明细</div>
+          {% elif v.detail and not v.mismatch and s %}
             <span class="tag detail">明细</span>
             <div class="hint">{{ v.detail.point_count }} 个读数，与摘要相符</div>
           {% elif s %}
@@ -61,20 +68,37 @@
         <td class="mono">{{ s.p95_um if s else "—" }}</td>
         <td class="mono">{{ s.max_um if s else "—" }}</td>
         <td>
-          {% if s %}
-            <form class="inline" method="post"
-                  action="{{ url_for('retire_summary_route', batch_id=batch.id, summary_id=s.id) }}">
-              <button class="danger" type="submit">作废摘要</button>
-            </form>
-          {% endif %}
-          {% if v.detail %}
-            <form class="inline" method="post"
-                  action="{{ url_for('retire_detail_route', batch_id=batch.id, detail_id=v.detail.id) }}">
-              <button class="secondary" type="submit">停用明细</button>
-            </form>
+          {% if not v.finished %}
+            {% if s %}
+              <form class="inline" method="post"
+                    action="{{ url_for('retire_summary_route', batch_id=batch.id, summary_id=s.id) }}">
+                <button class="danger" type="submit">作废摘要</button>
+              </form>
+            {% endif %}
+            {% if v.detail %}
+              <form class="inline" method="post"
+                    action="{{ url_for('retire_detail_route', batch_id=batch.id, detail_id=v.detail.id) }}">
+                <button class="secondary" type="submit">停用明细</button>
+              </form>
+            {% endif %}
+          {% else %}
+            <span class="muted">接带建档固化</span>
           {% endif %}
         </td>
       </tr>
+      {% if v.finished %}
+      <tr>
+        <td></td>
+        <td colspan="6" class="hint">
+          成品卷 {{ v.coil.coil_no }} 的接带顺序（共 {{ v.finished_segments|length }} 段）：
+          {% for seg in v.finished_segments %}
+            第{{ seg.segment_order }}段：原卷 {{ seg.source_coil_no }}（批次 {{ seg.source_batch_no }}）、
+            原明细 #{{ seg.detail_id }}、测点 {{ seg.start_idx }}–{{ seg.end_idx }}{% if not loop.last %}；{% endif %}
+          {% endfor %}。
+          <a href="{{ url_for('finished_detail', batch_id=batch.id, finished_id=v.finished.id) }}">查看成品档案</a>
+        </td>
+      </tr>
+      {% endif %}
       {% if v.mismatch %}
       <tr>
         <td></td>
@@ -156,6 +180,75 @@
   <datalist id="coil-list">
     {% for v in views %}<option value="{{ v.coil.coil_no }}">{% endfor %}
   </datalist>
+</div>
+
+<div class="card">
+  <h2>复卷接带建档（两卷余料接成一卷成品）</h2>
+  <form method="post" action="{{ url_for('create_finished', batch_id=batch.id) }}">
+    <div class="row">
+      <div style="flex:2 1 200px">
+        <label for="f_coil">新成品卷号</label>
+        <input id="f_coil" type="text" name="coil_no" required maxlength="64"
+               placeholder="例如 R-2026-11-001">
+      </div>
+    </div>
+
+    <h3>第 1 段（先接）</h3>
+    <div class="row">
+      <div style="flex:3 1 260px">
+        <label for="detail_1">原明细（其他批次当前有效）</label>
+        <select id="detail_1" name="detail_1" required>
+          <option value="">请选择原卷 / 原明细</option>
+          {% for src in sources %}
+          <option value="{{ src.row.id }}">
+            批次 {{ src.row.source_batch_no }} · 卷 {{ src.row.source_coil_no }} ·
+            明细 #{{ src.row.id }}（{{ src.row.point_count }} 点）
+            {% if src.occupancies %}已占用：{% for o in src.occupancies %}{{ o.start_idx }}-{{ o.end_idx }}{% if not loop.last %}，{% endif %}{% endfor %}{% endif %}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div><label for="start_1">起始序号</label>
+        <input id="start_1" type="number" name="start_1" min="1" step="1" required></div>
+      <div><label for="end_1">截止序号</label>
+        <input id="end_1" type="number" name="end_1" min="1" step="1" required></div>
+    </div>
+
+    <h3>第 2 段（后接）</h3>
+    <div class="row">
+      <div style="flex:3 1 260px">
+        <label for="detail_2">原明细（其他批次当前有效，须为另一卷）</label>
+        <select id="detail_2" name="detail_2" required>
+          <option value="">请选择原卷 / 原明细</option>
+          {% for src in sources %}
+          <option value="{{ src.row.id }}">
+            批次 {{ src.row.source_batch_no }} · 卷 {{ src.row.source_coil_no }} ·
+            明细 #{{ src.row.id }}（{{ src.row.point_count }} 点）
+            {% if src.occupancies %}已占用：{% for o in src.occupancies %}{{ o.start_idx }}-{{ o.end_idx }}{% if not loop.last %}，{% endif %}{% endfor %}{% endif %}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div><label for="start_2">起始序号</label>
+        <input id="start_2" type="number" name="start_2" min="1" step="1" required></div>
+      <div><label for="end_2">截止序号</label>
+        <input id="end_2" type="number" name="end_2" min="1" step="1" required></div>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <div style="flex:0 0 auto"><button type="submit">建立成品档并登记占用</button></div>
+    </div>
+    <div class="hint">
+      序号按所选明细 CSV 原顺序从 1 起算，首尾都计入；每段必须落在该原明细的测点范围内。
+      同一份原明细的每个测点最多用于一卷成品，区间已被占用会被拒绝。
+      提交时若任一原明细已换下或停用、任一区间已被占用、成品卷号已存在或保存出错，
+      成品档和本次占用都不生效。读数只保存一份：成品卷引用原明细，不复制读数。
+      源卷之后换档或停用明细，本成品仍按建档时冻结的原件区间核算。
+    </div>
+    {% if not sources %}
+    <div class="empty">其他批次当前没有可用的有效明细：请先在其他批次为卷登记相符的摘要并上传明细。</div>
+    {% endif %}
+  </form>
 </div>
 
 <div class="card">

@@ -109,6 +109,48 @@ CREATE TABLE IF NOT EXISTS determinations (
     created_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_det_batch ON determinations(batch_id, id);
+
+-- A rewound finished coil is made by splicing two leftover source coils.
+-- Its readings are never copied: every segment points back at the original
+-- uploaded detail row and the 1-based inclusive point range taken from it,
+-- so the archive keeps a single physical copy of every reading.
+CREATE TABLE IF NOT EXISTS finished_coils (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    coil_id       INTEGER NOT NULL UNIQUE REFERENCES coils(id) ON DELETE CASCADE,
+    batch_id      INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+    point_count   INTEGER NOT NULL,
+    min_um        INTEGER NOT NULL,
+    p95_um        INTEGER NOT NULL,
+    max_um        INTEGER NOT NULL,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_finished_batch ON finished_coils(batch_id);
+
+CREATE TABLE IF NOT EXISTS finished_segments (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    finished_coil_id INTEGER NOT NULL REFERENCES finished_coils(id) ON DELETE CASCADE,
+    segment_order    INTEGER NOT NULL,          -- 1-based splice order
+    detail_id        INTEGER NOT NULL REFERENCES details(id) ON DELETE RESTRICT,
+    source_coil_no   TEXT NOT NULL,             -- captured at creation time
+    source_batch_no  TEXT NOT NULL,
+    start_idx        INTEGER NOT NULL,          -- 1-based, inclusive, CSV order
+    end_idx          INTEGER NOT NULL,
+    UNIQUE (finished_coil_id, segment_order)
+);
+CREATE INDEX IF NOT EXISTS idx_finseg_detail ON finished_segments(detail_id);
+
+-- One reservation per occupied range of a source detail.  Overlap is rejected
+-- inside the write transaction, so every point of one detail can serve at most
+-- one finished coil.  Rows live exactly as long as the finished coil itself.
+CREATE TABLE IF NOT EXISTS detail_occupancies (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    detail_id        INTEGER NOT NULL REFERENCES details(id) ON DELETE RESTRICT,
+    finished_coil_id INTEGER NOT NULL REFERENCES finished_coils(id) ON DELETE CASCADE,
+    start_idx        INTEGER NOT NULL,
+    end_idx          INTEGER NOT NULL,
+    created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_occ_detail ON detail_occupancies(detail_id);
 """
 
 
@@ -193,6 +235,14 @@ def parse_int(value, label: str, minimum: int = 0, maximum: int = _MAX_STAT) -> 
 
 def parse_point_count(value) -> int:
     return parse_int(value, "测点数", minimum=1, maximum=5_000_000)
+
+
+def parse_segment_index(value, label: str, upper: int | None = None) -> int:
+    """A 1-based point index inside an uploaded detail CSV."""
+    number = parse_int(value, label, minimum=1, maximum=5_000_000)
+    if upper is not None and number > upper:
+        raise InputError(f"{label} {number} 超出原明细范围（共 {upper} 个测点）")
+    return number
 
 
 def normalise_coil_no(value) -> str:
@@ -408,6 +458,44 @@ def build_snapshot(conn, batch_id: int) -> tuple[list[qc.CoilSnapshot], list[str
     blocked: list[str] = []
 
     for coil in coils:
+        finished = fetch_finished_by_coil(conn, coil["id"])
+        if finished is not None:
+            # Spliced finished coils are always accounted for from the frozen
+            # source ranges captured at creation time: later retirement or
+            # summary changes on a source coil never rewrite this archive.
+            segments = fetch_finished_segments(conn, finished["id"])
+            if not segments:
+                missing.append(coil["coil_no"])
+                continue
+            readings = tuple(sorted(assembled_finished_readings(conn, segments)))
+            derived = qc.readings_stats(readings)
+            archived = (
+                finished["point_count"],
+                finished["min_um"],
+                finished["p95_um"],
+                finished["max_um"],
+            )
+            if derived != archived:
+                blocked.append(
+                    f"成品卷 {coil['coil_no']} 的接带读数实算与建档摘要不一致"
+                )
+                continue
+            summary = active_summary(conn, coil["id"])
+            snapshots.append(
+                qc.CoilSnapshot(
+                    coil_id=coil["id"],
+                    coil_no=coil["coil_no"],
+                    n=archived[0],
+                    mn=archived[1],
+                    p=archived[2],
+                    mx=archived[3],
+                    detail_id=None,
+                    summary_id=summary["id"] if summary else None,
+                    readings=readings,
+                )
+            )
+            continue
+
         summary = active_summary(conn, coil["id"])
         detail = active_detail(conn, coil["id"])
         if summary is None and detail is None:
@@ -508,6 +596,10 @@ def fetch_coil_views(conn, batch_id: int):
         summary = active_summary(conn, coil["id"])
         detail = active_detail(conn, coil["id"])
         mismatch = detail_summary_mismatch(detail, summary) if detail else None
+        finished = fetch_finished_by_coil(conn, coil["id"])
+        finished_segments = (
+            fetch_finished_segments(conn, finished["id"]) if finished else []
+        )
         retired_details = conn.execute(
             "SELECT * FROM details WHERE coil_id = ? AND active = 0 "
             "ORDER BY id DESC LIMIT 5",
@@ -528,9 +620,134 @@ def fetch_coil_views(conn, batch_id: int):
                 "detail": detail,
                 "mismatch": mismatch,
                 "retired_details": retired_views,
+                "finished": finished,
+                "finished_segments": finished_segments,
             }
         )
     return views
+
+
+# ---------------------------------------------------------------------------
+# Rewind / spliced finished coils
+# ---------------------------------------------------------------------------
+
+def fetch_finished_by_coil(conn, coil_id: int):
+    return conn.execute(
+        "SELECT * FROM finished_coils WHERE coil_id = ?", (coil_id,)
+    ).fetchone()
+
+
+def fetch_finished_segments(conn, finished_coil_id: int):
+    return conn.execute(
+        "SELECT * FROM finished_segments WHERE finished_coil_id = ? "
+        "ORDER BY segment_order",
+        (finished_coil_id,),
+    ).fetchall()
+
+
+def fetch_occupancies(conn, detail_id: int):
+    return conn.execute(
+        "SELECT * FROM detail_occupancies WHERE detail_id = ? ORDER BY start_idx, id",
+        (detail_id,),
+    ).fetchall()
+
+
+def available_source_details(conn, target_batch_id: int):
+    """Active details of other batches, each with the coil and its summary.
+
+    Only details that currently pass the original adoption rule (active and
+    matching their coil's active summary) are offered as splice sources.
+    """
+    return conn.execute(
+        """
+        SELECT d.*, c.coil_no AS source_coil_no, c.batch_id AS source_batch_id,
+               b.batch_no AS source_batch_no, s.id AS summary_id
+        FROM details d
+        JOIN coils c ON c.id = d.coil_id
+        JOIN batches b ON b.id = c.batch_id
+        LEFT JOIN summaries s ON s.id = (
+            SELECT id FROM summaries WHERE coil_id = c.id AND active = 1
+            ORDER BY id DESC LIMIT 1
+        )
+        WHERE d.active = 1 AND c.batch_id <> ?
+        ORDER BY b.batch_no, c.coil_no, d.id
+        """,
+        (target_batch_id,),
+    ).fetchall()
+
+
+def load_source_detail(conn, detail_id: int, target_batch_id: int):
+    """Fetch an active splice-source detail from another batch, or raise."""
+    row = conn.execute(
+        """
+        SELECT d.*, c.coil_no AS source_coil_no, c.batch_id AS source_batch_id,
+               b.batch_no AS source_batch_no
+        FROM details d
+        JOIN coils c ON c.id = d.coil_id
+        JOIN batches b ON b.id = c.batch_id
+        WHERE d.id = ?
+        """,
+        (detail_id,),
+    ).fetchone()
+    if row is None:
+        raise InputError(f"原明细 #{detail_id} 不存在")
+    if row["source_batch_id"] == target_batch_id:
+        raise InputError("成品只能拼接其他批次的原卷明细")
+    if not row["active"]:
+        raise InputError(
+            f"原明细 #{detail_id}（{row['source_batch_no']} / "
+            f"{row['source_coil_no']}）已停用，不能作为接带来源"
+        )
+    return row
+
+
+def segment_readings(detail_row, start_idx: int, end_idx: int) -> list[int]:
+    """Take an inclusive 1-based slice of the detail's readings in CSV order."""
+    stored = json.loads(detail_row["readings"])
+    if end_idx > len(stored):
+        raise InputError(
+            f"原明细 #{detail_row['id']} 只有 {len(stored)} 个测点，"
+            f"区间 {start_idx}-{end_idx} 超出范围"
+        )
+    return [int(v) for v in stored[start_idx - 1:end_idx]]
+
+
+def assembled_finished_readings(conn, segments) -> list[int]:
+    """Concatenate the frozen source ranges in splice order.
+
+    Readings stay where they were uploaded: this function only references the
+    original detail rows, never copies their JSON payload.
+    """
+    ordered = sorted(segments, key=lambda r: r["segment_order"])
+    collected: list[int] = []
+    for seg in ordered:
+        detail = conn.execute(
+            "SELECT * FROM details WHERE id = ?", (seg["detail_id"],)
+        ).fetchone()
+        if detail is None:
+            raise InputError(
+                f"成品接带段引用的原明细 #{seg['detail_id']} 已不存在，无法核算"
+            )
+        collected.extend(segment_readings(detail, seg["start_idx"], seg["end_idx"]))
+    return collected
+
+
+def occupancy_overlaps(conn, detail_id: int, start_idx: int, end_idx: int,
+                       exclude_finished: int | None = None):
+    """Return the first existing reservation overlapping [start_idx, end_idx]."""
+    sql = (
+        "SELECT o.*, fc.coil_id, c.coil_no "
+        "FROM detail_occupancies o "
+        "JOIN finished_coils fc ON fc.id = o.finished_coil_id "
+        "JOIN coils c ON c.id = fc.coil_id "
+        "WHERE o.detail_id = ? AND o.start_idx <= ? AND o.end_idx >= ?"
+    )
+    params: list = [detail_id, end_idx, start_idx]
+    if exclude_finished is not None:
+        sql += " AND o.finished_coil_id <> ?"
+        params.append(exclude_finished)
+    sql += " ORDER BY o.id LIMIT 1"
+    return conn.execute(sql, params).fetchone()
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +799,14 @@ def batch_detail(batch_id: int):
     conn = get_db()
     batch = fetch_batch(conn, batch_id)
     views = fetch_coil_views(conn, batch_id)
+    sources = []
+    for d in available_source_details(conn, batch_id):
+        sources.append(
+            {
+                "row": d,
+                "occupancies": fetch_occupancies(conn, d["id"]),
+            }
+        )
     determinations = conn.execute(
         "SELECT * FROM determinations WHERE batch_id = ? ORDER BY id DESC LIMIT 20",
         (batch_id,),
@@ -600,7 +825,7 @@ def batch_detail(batch_id: int):
             }
         )
     return render_template(
-        "batch.html", batch=batch, views=views, history=history
+        "batch.html", batch=batch, views=views, history=history, sources=sources
     )
 
 
@@ -638,6 +863,10 @@ def register_summary(batch_id: int):
     try:
         fetch_batch(conn, batch_id)
         coil = ensure_coil(conn, batch_id, coil_no)
+        if fetch_finished_by_coil(conn, coil["id"]) is not None:
+            raise InputError(
+                f"卷 {coil_no} 是复卷接带成品卷，摘要由接带建档生成，不能手工登记或换交"
+            )
         current = active_summary(conn, coil["id"])
         replaced = current is not None
         if current is not None:
@@ -720,6 +949,10 @@ def upload_detail(batch_id: int):
     try:
         fetch_batch(conn, batch_id)
         coil = ensure_coil(conn, batch_id, coil_no)
+        if fetch_finished_by_coil(conn, coil["id"]) is not None:
+            raise InputError(
+                f"卷 {coil_no} 是复卷接带成品卷，读数只保存在原卷明细中，不能再上传明细"
+            )
         if active_detail(conn, coil["id"]) is not None:
             raise InputError(
                 f"卷 {coil_no} 已有有效明细；如需重传，请先停用原明细"
@@ -862,6 +1095,8 @@ def retire_summary_route(batch_id: int, summary_id: int):
         ).fetchone()
         if row is None:
             raise InputError("摘要不存在")
+        if fetch_finished_by_coil(conn, row["coil_id"]) is not None:
+            raise InputError("成品卷的摘要由接带建档固化，不能作废")
         retire_summary(conn, summary_id, "人工作废")
         conn.execute("COMMIT")
     except Exception:
@@ -887,14 +1122,41 @@ def determine(batch_id: int):
             raise InputError(str(exc)) from exc
 
         verdict = bounds.verdict(limit)
+        # Attach the frozen splice provenance to finished-coil snapshot rows so
+        # the determination record shows which original details/ranges were used.
+        finished_lookup = {
+            row["coil_id"]: row
+            for row in conn.execute(
+                "SELECT * FROM finished_coils WHERE batch_id = ?", (batch_id,)
+            ).fetchall()
+        }
+        per_coil = []
+        for coil_snap, coil_row in zip(snapshots, bounds.per_coil):
+            entry = dict(coil_row)
+            fin = finished_lookup.get(coil_snap.coil_id)
+            if fin is not None:
+                entry["kind"] = "finished"
+                entry["segments"] = [
+                    {
+                        "segment_order": seg["segment_order"],
+                        "source_batch_no": seg["source_batch_no"],
+                        "source_coil_no": seg["source_coil_no"],
+                        "detail_id": seg["detail_id"],
+                        "start_idx": seg["start_idx"],
+                        "end_idx": seg["end_idx"],
+                    }
+                    for seg in fetch_finished_segments(conn, fin["id"])
+                ]
+            per_coil.append(entry)
         snapshot = {
-            "coils": [dict(c) for c in bounds.per_coil],
+            "coils": per_coil,
             "notes": notes,
             "limit_um": limit,
             "computed_at": utcnow(),
             "method": (
                 "逐卷按已提交摘要的闭式计数求整批 P95 的可行区间，"
-                "明细卷按完整读数计数；未把摘要展开为逐点读数"
+                "明细卷与复卷成品卷按完整读数计数；未把摘要展开为逐点读数。"
+                "成品卷读数按建档时冻结的原卷接带区间取数"
             ),
         }
         cur = conn.execute(
@@ -947,6 +1209,189 @@ def determination_detail(batch_id: int, det_id: int):
     }
     return render_template(
         "result.html", batch=batch, det=detail, limit=row["limit_um"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rewind splice: build a finished coil from two other-batch source details
+# ---------------------------------------------------------------------------
+
+def _parse_segment_form(ordinal: int) -> tuple[int, int, int]:
+    detail_id = parse_int(
+        request.form.get(f"detail_{ordinal}"), f"第 {ordinal} 段原明细号", minimum=1
+    )
+    start = parse_segment_index(
+        request.form.get(f"start_{ordinal}"), f"第 {ordinal} 段起始序号"
+    )
+    end = parse_segment_index(
+        request.form.get(f"end_{ordinal}"), f"第 {ordinal} 段截止序号"
+    )
+    if start > end:
+        raise InputError(
+            f"第 {ordinal} 段起始序号 {start} 不能大于截止序号 {end}（首尾都计入）"
+        )
+    return detail_id, start, end
+
+
+@app.post("/batch/<int:batch_id>/finished")
+def create_finished(batch_id: int):
+    coil_no = normalise_coil_no(request.form.get("coil_no"))
+    detail_id_1, start_1, end_1 = _parse_segment_form(1)
+    detail_id_2, start_2, end_2 = _parse_segment_form(2)
+
+    conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        fetch_batch(conn, batch_id)
+        existing = conn.execute(
+            "SELECT id FROM coils WHERE batch_id = ? AND coil_no = ?",
+            (batch_id, coil_no),
+        ).fetchone()
+        if existing is not None:
+            raise InputError(f"成品卷号 {coil_no} 已存在")
+
+        if detail_id_1 == detail_id_2:
+            raise InputError("接带需要两卷余料：两段不能选用同一份原明细")
+
+        src_1 = load_source_detail(conn, detail_id_1, batch_id)
+        src_2 = load_source_detail(conn, detail_id_2, batch_id)
+        # The two details must describe two distinct source coils.
+        if src_1["coil_id"] == src_2["coil_id"]:
+            raise InputError("接带需要两卷余料：两段必须来自不同的原卷")
+
+        for src, start, end in (
+            (src_1, start_1, end_1),
+            (src_2, start_2, end_2),
+        ):
+            if end > src["point_count"]:
+                raise InputError(
+                    f"原明细 #{src['id']}（{src['source_batch_no']} / "
+                    f"{src['source_coil_no']}）只有 {src['point_count']} 个测点，"
+                    f"区间 {start}-{end} 超出原明细范围"
+                )
+            clash = occupancy_overlaps(conn, src["id"], start, end)
+            if clash is not None:
+                raise InputError(
+                    f"原明细 #{src['id']} 的测点 {start}-{end} 已被成品卷 "
+                    f"{clash['coil_no']} 占用（已占用区间 "
+                    f"{clash['start_idx']}-{clash['end_idx']}），"
+                    "同一份原明细的每个测点最多用于一卷成品"
+                )
+
+        # Readings are referenced, never duplicated: splice the two frozen
+        # ranges in the submitted order and derive the finished summary.
+        readings = (
+            segment_readings(src_1, start_1, end_1)
+            + segment_readings(src_2, start_2, end_2)
+        )
+        n, mn, p95, mx = qc.readings_stats(readings)
+
+        now = utcnow()
+        coil_cur = conn.execute(
+            "INSERT INTO coils(batch_id, coil_no, created_at) VALUES (?, ?, ?)",
+            (batch_id, coil_no, now),
+        )
+        new_coil_id = coil_cur.lastrowid
+        fin_cur = conn.execute(
+            """
+            INSERT INTO finished_coils(coil_id, batch_id, point_count, min_um,
+                                       p95_um, max_um, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (new_coil_id, batch_id, n, mn, p95, mx, now),
+        )
+        finished_id = fin_cur.lastrowid
+
+        for ordinal, src, start, end in (
+            (1, src_1, start_1, end_1),
+            (2, src_2, start_2, end_2),
+        ):
+            conn.execute(
+                """
+                INSERT INTO finished_segments(finished_coil_id, segment_order,
+                    detail_id, source_coil_no, source_batch_no, start_idx,
+                    end_idx)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    finished_id,
+                    ordinal,
+                    src["id"],
+                    src["source_coil_no"],
+                    src["source_batch_no"],
+                    start,
+                    end,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO detail_occupancies(detail_id, finished_coil_id,
+                    start_idx, end_idx, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (src["id"], finished_id, start, end, now),
+            )
+
+        # The finished coil participates in the existing determination flow
+        # through a normal summary row holding exactly the derived stats.
+        conn.execute(
+            """
+            INSERT INTO summaries(coil_id, point_count, min_um, p95_um, max_um,
+                                  active, created_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?)
+            """,
+            (new_coil_id, n, mn, p95, mx, now),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        rollback_quiet(conn)
+        raise
+
+    flash(
+        f"成品卷 {coil_no} 已建档：{n} 个测点，最薄 {mn} / P95 {p95} / "
+        f"最厚 {mx} μm，接带两段的占用已同时登记",
+        "ok",
+    )
+    return redirect(
+        url_for(
+            "finished_detail",
+            batch_id=batch_id,
+            finished_id=finished_id,
+        )
+    )
+
+
+@app.route("/batch/<int:batch_id>/finished/<int:finished_id>")
+def finished_detail(batch_id: int, finished_id: int):
+    conn = get_db()
+    batch = fetch_batch(conn, batch_id)
+    finished = conn.execute(
+        "SELECT * FROM finished_coils WHERE id = ? AND batch_id = ?",
+        (finished_id, batch_id),
+    ).fetchone()
+    if finished is None:
+        abort(404)
+    coil = conn.execute(
+        "SELECT * FROM coils WHERE id = ?", (finished["coil_id"],)
+    ).fetchone()
+    segments = []
+    for seg in fetch_finished_segments(conn, finished_id):
+        detail = conn.execute(
+            "SELECT * FROM details WHERE id = ?", (seg["detail_id"],)
+        ).fetchone()
+        segments.append(
+            {
+                "row": seg,
+                "detail": detail,
+                "occupancies": fetch_occupancies(conn, seg["detail_id"]),
+            }
+        )
+    return render_template(
+        "finished.html",
+        batch=batch,
+        finished=finished,
+        coil=coil,
+        segments=segments,
     )
 
 
